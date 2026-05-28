@@ -1,0 +1,645 @@
+---
+title: "R-Based Forecasting Project: Construction Cost Index (2015=100)"
+author: "Adın Soyadın - Öğrenci Numarası"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## 1. Project Overview
+
+This project forecasts the Construction Cost Index (2015=100) published by TurkStat (TÜİK) using monthly time series data accessed directly through the `tuikr` R package. The forecast target is February 2026, the next period after the latest available observation (January 2026).
+
+## 2. Data Access via tuikr
+
+```{r data-access}
+library(tuikr)
+library(httr)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+
+tables_price <- statistical_tables(theme = "6")
+
+url_cci <- tables_price$table_url[
+  tables_price$table_name == "Construction Cost Index (2015=100) and Rate of Change "]
+
+response_cci <- GET(
+  url_cci,
+  add_headers(
+    "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept"     = "application/json, text/plain, */*",
+    "Referer"    = "https://veriportali.tuik.gov.tr/"
+  )
+)
+
+cat("HTTP Status:", status_code(response_cci), "\n")
+cat("Data access date:", format(Sys.time(), "%Y-%m-%d"), "\n")
+
+raw_cci <- content(response_cci, as = "raw")
+tmp_cci <- tempfile(fileext = ".xls")
+writeBin(raw_cci, tmp_cci)
+df_cci  <- read_excel(tmp_cci)
+```
+
+## 3. Data Preparation
+
+```{r data-prep}
+colnames(df_cci) <- c("year","Jan","Feb","Mar","Apr","May","Jun",
+                       "Jul","Aug","Sep","Oct","Nov","Dec")
+
+df_index <- df_cci[6:17, ]
+
+df_long <- df_index %>%
+  mutate(year = as.integer(year)) %>%
+  pivot_longer(cols = Jan:Dec, names_to = "month", values_to = "index") %>%
+  mutate(
+    month_num = match(month, c("Jan","Feb","Mar","Apr","May","Jun",
+                                "Jul","Aug","Sep","Oct","Nov","Dec")),
+    index = as.numeric(index)
+  ) %>%
+  filter(!is.na(index)) %>%
+  arrange(year, month_num)
+
+ts_cci <- ts(df_long$index, start = c(2015, 1), frequency = 12)
+
+cat("Latest available observation: 2026 January\n")
+cat("Forecast target period: 2026 February\n")
+cat("Number of observations:", nrow(df_long), "\n")
+```
+
+## 4. Exploratory Time Series Analysis
+
+```{r eda-plot}
+plot_data <- data.frame(
+  date  = as.numeric(time(ts_cci)),
+  index = as.numeric(ts_cci)
+)
+
+ggplot(plot_data, aes(x = date, y = index)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 1.5) +
+  labs(
+    title    = "Construction Cost Index (2015=100)",
+    subtitle = "Turkey, Monthly (January 2015 - January 2026)",
+    x = "Year", y = "Index Value",
+    caption  = "Source: TurkStat (TÜİK)"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = 2015:2026)
+```
+
+The series shows a strong upward trend, especially from 2021 onward due to high inflation in Turkey. Seasonality is weak relative to the dominant trend. No missing values detected.
+
+## 5. Naive Forecasting
+
+```{r naive}
+naive_forecast <- as.numeric(tail(ts_cci, 1))
+naive_fitted   <- c(NA, as.numeric(ts_cci[-length(ts_cci)]))
+naive_errors   <- as.numeric(ts_cci) - naive_fitted
+
+naive_bias <- mean(naive_errors, na.rm = TRUE)
+naive_mad  <- mean(abs(naive_errors), na.rm = TRUE)
+naive_mse  <- mean(naive_errors^2, na.rm = TRUE)
+naive_mape <- mean(abs(naive_errors / as.numeric(ts_cci)) * 100, na.rm = TRUE)
+naive_rsfe <- sum(naive_errors, na.rm = TRUE)
+naive_ts   <- naive_rsfe / naive_mad
+
+cat("Naive Forecast Feb 2026:", round(naive_forecast, 2), "\n")
+cat("Bias:", round(naive_bias, 2), "| MAD:", round(naive_mad, 2),
+    "| MSE:", round(naive_mse, 2), "| MAPE:", round(naive_mape, 2), "%\n")
+cat("RSFE:", round(naive_rsfe, 2), "| Tracking Signal:", round(naive_ts, 2), "\n")
+
+naive_df <- data.frame(
+  date   = as.numeric(time(ts_cci)),
+  actual = as.numeric(ts_cci),
+  fitted = naive_fitted
+)
+
+ggplot(naive_df, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = fitted, color = "Naive Forecast"),
+            linewidth = 0.8, linetype = "dashed", na.rm = TRUE) +
+  scale_color_manual(values = c("Actual" = "steelblue",
+                                 "Naive Forecast" = "red")) +
+  labs(title = "Actual vs Naive Forecast", x = "Year",
+       y = "Index Value", color = "") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = 2015:2026)
+```
+
+## 6. Moving Average
+
+```{r moving-average}
+window     <- 3
+ma_fitted  <- as.numeric(stats::filter(ts_cci, rep(1/window, window), sides = 1))
+ma_forecast <- mean(tail(as.numeric(ts_cci), window))
+
+ma_errors <- as.numeric(ts_cci) - ma_fitted
+ma_bias <- mean(ma_errors, na.rm = TRUE)
+ma_mad  <- mean(abs(ma_errors), na.rm = TRUE)
+ma_mse  <- mean(ma_errors^2, na.rm = TRUE)
+ma_mape <- mean(abs(ma_errors / as.numeric(ts_cci)) * 100, na.rm = TRUE)
+ma_rsfe <- sum(ma_errors, na.rm = TRUE)
+ma_ts   <- ma_rsfe / ma_mad
+
+cat("MA(3) Forecast Feb 2026:", round(ma_forecast, 2), "\n")
+cat("Bias:", round(ma_bias, 2), "| MAD:", round(ma_mad, 2),
+    "| MSE:", round(ma_mse, 2), "| MAPE:", round(ma_mape, 2), "%\n")
+cat("RSFE:", round(ma_rsfe, 2), "| Tracking Signal:", round(ma_ts, 2), "\n")
+
+ma_df <- data.frame(
+  date   = as.numeric(time(ts_cci)),
+  actual = as.numeric(ts_cci),
+  fitted = ma_fitted
+)
+
+ggplot(ma_df, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = fitted, color = "MA(3)"),
+            linewidth = 0.8, linetype = "dashed", na.rm = TRUE) +
+  scale_color_manual(values = c("Actual" = "steelblue", "MA(3)" = "darkgreen")) +
+  labs(title = "Actual vs Moving Average (3-month)", x = "Year",
+       y = "Index Value", color = "") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = 2015:2026)
+```
+
+## 7. Weighted Moving Average
+
+```{r wma}
+w <- c(0.1, 0.3, 0.6)
+n <- length(ts_cci)
+wma_fitted <- rep(NA, n)
+for (i in 3:n) {
+  wma_fitted[i] <- sum(w * as.numeric(ts_cci)[(i-2):i])
+}
+wma_forecast <- sum(w * tail(as.numeric(ts_cci), 3))
+
+wma_errors <- as.numeric(ts_cci) - wma_fitted
+wma_bias <- mean(wma_errors, na.rm = TRUE)
+wma_mad  <- mean(abs(wma_errors), na.rm = TRUE)
+wma_mse  <- mean(wma_errors^2, na.rm = TRUE)
+wma_mape <- mean(abs(wma_errors / as.numeric(ts_cci)) * 100, na.rm = TRUE)
+wma_rsfe <- sum(wma_errors, na.rm = TRUE)
+wma_ts   <- wma_rsfe / wma_mad
+
+cat("WMA Forecast Feb 2026:", round(wma_forecast, 2), "\n")
+cat("Bias:", round(wma_bias, 2), "| MAD:", round(wma_mad, 2),
+    "| MSE:", round(wma_mse, 2), "| MAPE:", round(wma_mape, 2), "%\n")
+cat("RSFE:", round(wma_rsfe, 2), "| Tracking Signal:", round(wma_ts, 2), "\n")
+
+wma_df <- data.frame(
+  date   = as.numeric(time(ts_cci)),
+  actual = as.numeric(ts_cci),
+  fitted = wma_fitted
+)
+
+ggplot(wma_df, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = fitted, color = "WMA"),
+            linewidth = 0.8, linetype = "dashed", na.rm = TRUE) +
+  scale_color_manual(values = c("Actual" = "steelblue", "WMA" = "orange")) +
+  labs(title = "Actual vs Weighted Moving Average (0.1, 0.3, 0.6)",
+       x = "Year", y = "Index Value", color = "") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = 2015:2026)
+```
+
+## 8. Exponential Smoothing
+
+```{r exp_smoothing}
+library(forecast)
+
+# Test alpha = 0.9 (high - suitable for trending series)
+es_model <- ses(ts_cci, alpha = 0.9, h = 1)
+es_forecast <- as.numeric(es_model$mean)
+es_fitted <- as.numeric(es_model$fitted)
+
+es_errors <- as.numeric(ts_cci) - es_fitted
+es_bias <- mean(es_errors, na.rm = TRUE)
+es_mad  <- mean(abs(es_errors), na.rm = TRUE)
+es_mse  <- mean(es_errors^2, na.rm = TRUE)
+es_mape <- mean(abs(es_errors / as.numeric(ts_cci)) * 100, na.rm = TRUE)
+es_rsfe <- sum(es_errors, na.rm = TRUE)
+es_ts   <- es_rsfe / es_mad
+
+cat("Exponential Smoothing (alpha=0.9) Forecast Feb 2026:", 
+    round(es_forecast, 2), "\n")
+cat("Bias:", round(es_bias, 2), "| MAD:", round(es_mad, 2),
+    "| MSE:", round(es_mse, 2), "| MAPE:", round(es_mape, 2), "%\n")
+cat("RSFE:", round(es_rsfe, 2), "| Tracking Signal:", round(es_ts, 2), "\n")
+
+es_df <- data.frame(
+  date   = as.numeric(time(ts_cci)),
+  actual = as.numeric(ts_cci),
+  fitted = es_fitted
+)
+
+ggplot(es_df, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = fitted, color = "ES (alpha=0.9)"),
+            linewidth = 0.8, linetype = "dashed") +
+  scale_color_manual(values = c("Actual" = "steelblue",
+                                 "ES (alpha=0.9)" = "purple")) +
+  labs(title = "Actual vs Exponential Smoothing (alpha=0.9)",
+       x = "Year", y = "Index Value", color = "") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = 2015:2026)
+```
+
+## 9. Trend-Adjusted Exponential Smoothing (Holt's Method)
+
+```{r trend-es}
+# Holt's method - suitable since series has strong trend
+holt_model <- holt(ts_cci, alpha = 0.9, beta = 0.3, h = 1)
+holt_forecast <- as.numeric(holt_model$mean)
+holt_fitted <- as.numeric(holt_model$fitted)
+
+holt_errors <- as.numeric(ts_cci) - holt_fitted
+holt_bias <- mean(holt_errors, na.rm = TRUE)
+holt_mad  <- mean(abs(holt_errors), na.rm = TRUE)
+holt_mse  <- mean(holt_errors^2, na.rm = TRUE)
+holt_mape <- mean(abs(holt_errors / as.numeric(ts_cci)) * 100, na.rm = TRUE)
+holt_rsfe <- sum(holt_errors, na.rm = TRUE)
+holt_ts   <- holt_rsfe / holt_mad
+
+cat("Holt's Forecast Feb 2026:", round(holt_forecast, 2), "\n")
+cat("Bias:", round(holt_bias, 2), "| MAD:", round(holt_mad, 2),
+    "| MSE:", round(holt_mse, 2), "| MAPE:", round(holt_mape, 2), "%\n")
+cat("RSFE:", round(holt_rsfe, 2), "| Tracking Signal:", round(holt_ts, 2), "\n")
+
+holt_df <- data.frame(
+  date   = as.numeric(time(ts_cci)),
+  actual = as.numeric(ts_cci),
+  fitted = holt_fitted
+)
+
+ggplot(holt_df, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = fitted, color = "Holt's Method"),
+            linewidth = 0.8, linetype = "dashed") +
+  scale_color_manual(values = c("Actual" = "steelblue",
+                                 "Holt's Method" = "darkred")) +
+  labs(title = "Actual vs Trend-Adjusted Exponential Smoothing (Holt's)",
+       subtitle = "alpha=0.9, beta=0.3",
+       x = "Year", y = "Index Value", color = "") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = 2015:2026)
+```
+
+## 10. Linear Trend Projection
+
+```{r linear-trend}
+# Create time index
+t <- 1:length(ts_cci)
+trend_model <- lm(as.numeric(ts_cci) ~ t)
+summary(trend_model)
+
+trend_fitted <- as.numeric(fitted(trend_model))
+trend_forecast <- predict(trend_model, newdata = data.frame(t = length(ts_cci) + 1))
+
+trend_errors <- as.numeric(ts_cci) - trend_fitted
+trend_bias <- mean(trend_errors)
+trend_mad  <- mean(abs(trend_errors))
+trend_mse  <- mean(trend_errors^2)
+trend_mape <- mean(abs(trend_errors / as.numeric(ts_cci)) * 100)
+trend_rsfe <- sum(trend_errors)
+trend_ts   <- trend_rsfe / trend_mad
+
+cat("Linear Trend Forecast Feb 2026:", round(trend_forecast, 2), "\n")
+cat("Intercept:", round(coef(trend_model)[1], 2), 
+    "| Slope:", round(coef(trend_model)[2], 2), "\n")
+cat("Bias:", round(trend_bias, 2), "| MAD:", round(trend_mad, 2),
+    "| MSE:", round(trend_mse, 2), "| MAPE:", round(trend_mape, 2), "%\n")
+cat("RSFE:", round(trend_rsfe, 2), "| Tracking Signal:", round(trend_ts, 2), "\n")
+
+trend_df <- data.frame(
+  date   = as.numeric(time(ts_cci)),
+  actual = as.numeric(ts_cci),
+  fitted = trend_fitted
+)
+
+ggplot(trend_df, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = fitted, color = "Linear Trend"),
+            linewidth = 0.8, linetype = "dashed") +
+  scale_color_manual(values = c("Actual" = "steelblue",
+                                 "Linear Trend" = "brown")) +
+  labs(title = "Actual vs Linear Trend Projection",
+       x = "Year", y = "Index Value", color = "") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = 2015:2026)
+```
+## 11. Seasonal Indices
+
+```{r seasonal_indices}
+# Monthly seasonal indices
+# Extract month from time series
+months <- cycle(ts_cci)
+years  <- floor(time(ts_cci))
+
+# Calculate seasonal indices
+monthly_means <- tapply(as.numeric(ts_cci), months, mean)
+overall_mean  <- mean(as.numeric(ts_cci))
+seasonal_idx  <- monthly_means / overall_mean
+
+cat("Seasonal Indices by Month:\n")
+month_names <- c("Jan","Feb","Mar","Apr","May","Jun",
+                  "Jul","Aug","Sep","Oct","Nov","Dec")
+for(i in 1:12) {
+  cat(month_names[i], ":", round(seasonal_idx[i], 4), "\n")
+}
+
+# The series has a dominant trend; seasonal variation is minimal
+# Deseasonalized values
+deseasonalized <- as.numeric(ts_cci) / seasonal_idx[months]
+
+# Seasonal indices plot
+si_df <- data.frame(
+  month = month_names,
+  index = as.numeric(seasonal_idx)
+)
+si_df$month <- factor(si_df$month, levels = month_names)
+
+ggplot(si_df, aes(x = month, y = index)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.7) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  labs(title = "Seasonal Indices by Month",
+       subtitle = "Values above 1 indicate above-average months",
+       x = "Month", y = "Seasonal Index") +
+  theme_minimal()
+```
+
+## 12. Additive Decomposition
+
+```{r additive_decomp}
+# Additive decomposition
+decomp_add <- decompose(ts_cci, type = "additive")
+
+# Plot decomposition
+plot(decomp_add)
+
+# Forecast using trend + seasonal
+trend_comp    <- as.numeric(decomp_add$trend)
+seasonal_comp <- as.numeric(decomp_add$seasonal)
+random_comp   <- as.numeric(decomp_add$random)
+
+# Fitted values
+add_fitted <- trend_comp + seasonal_comp
+add_errors <- as.numeric(ts_cci) - add_fitted
+add_bias <- mean(add_errors, na.rm = TRUE)
+add_mad  <- mean(abs(add_errors), na.rm = TRUE)
+add_mse  <- mean(add_errors^2, na.rm = TRUE)
+add_mape <- mean(abs(add_errors / as.numeric(ts_cci)) * 100, na.rm = TRUE)
+add_rsfe <- sum(add_errors, na.rm = TRUE)
+add_ts   <- add_rsfe / add_mad
+
+cat("Additive Decomposition:\n")
+cat("Bias:", round(add_bias, 2), "| MAD:", round(add_mad, 2),
+    "| MSE:", round(add_mse, 2), "| MAPE:", round(add_mape, 2), "%\n")
+cat("RSFE:", round(add_rsfe, 2), "| Tracking Signal:", round(add_ts, 2), "\n")
+
+add_df <- data.frame(
+  date   = as.numeric(time(ts_cci)),
+  actual = as.numeric(ts_cci),
+  fitted = add_fitted
+)
+
+ggplot(add_df, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = fitted, color = "Additive Decomp"),
+            linewidth = 0.8, linetype = "dashed", na.rm = TRUE) +
+  scale_color_manual(values = c("Actual" = "steelblue",
+                                 "Additive Decomp" = "darkgreen")) +
+  labs(title = "Actual vs Additive Decomposition",
+       x = "Year", y = "Index Value", color = "") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = 2015:2026)
+```
+
+## 13. Multiplicative Decomposition
+
+```{r mult_decomp}
+decomp_mult <- decompose(ts_cci, type = "multiplicative")
+
+plot(decomp_mult)
+
+trend_m    <- as.numeric(decomp_mult$trend)
+seasonal_m <- as.numeric(decomp_mult$seasonal)
+
+mult_fitted <- trend_m * seasonal_m
+mult_errors <- as.numeric(ts_cci) - mult_fitted
+mult_bias <- mean(mult_errors, na.rm = TRUE)
+mult_mad  <- mean(abs(mult_errors), na.rm = TRUE)
+mult_mse  <- mean(mult_errors^2, na.rm = TRUE)
+mult_mape <- mean(abs(mult_errors / as.numeric(ts_cci)) * 100, na.rm = TRUE)
+mult_rsfe <- sum(mult_errors, na.rm = TRUE)
+mult_ts   <- mult_rsfe / mult_mad
+
+cat("Multiplicative Decomposition:\n")
+cat("Bias:", round(mult_bias, 2), "| MAD:", round(mult_mad, 2),
+    "| MSE:", round(mult_mse, 2), "| MAPE:", round(mult_mape, 2), "%\n")
+cat("RSFE:", round(mult_rsfe, 2), "| Tracking Signal:", round(mult_ts, 2), "\n")
+
+mult_df <- data.frame(
+  date   = as.numeric(time(ts_cci)),
+  actual = as.numeric(ts_cci),
+  fitted = mult_fitted
+)
+
+ggplot(mult_df, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = fitted, color = "Multiplicative Decomp"),
+            linewidth = 0.8, linetype = "dashed", na.rm = TRUE) +
+  scale_color_manual(values = c("Actual" = "steelblue",
+                                 "Multiplicative Decomp" = "darkred")) +
+  labs(title = "Actual vs Multiplicative Decomposition",
+       x = "Year", y = "Index Value", color = "") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = 2015:2026)
+```
+
+## 14. Regression with Trend and Seasonal Dummies
+
+```{r regression_seasonal}
+n <- length(ts_cci)
+t <- 1:n
+months_factor <- as.factor(cycle(ts_cci))
+
+reg_model <- lm(as.numeric(ts_cci) ~ t + months_factor)
+summary(reg_model)
+
+reg_fitted   <- as.numeric(fitted(reg_model))
+reg_forecast <- predict(reg_model, 
+                         newdata = data.frame(t = n + 1, 
+                                              months_factor = factor(2, 
+                                              levels = levels(months_factor))))
+
+reg_errors <- as.numeric(ts_cci) - reg_fitted
+reg_bias <- mean(reg_errors)
+reg_mad  <- mean(abs(reg_errors))
+reg_mse  <- mean(reg_errors^2)
+reg_mape <- mean(abs(reg_errors / as.numeric(ts_cci)) * 100)
+reg_rsfe <- sum(reg_errors)
+reg_ts   <- reg_rsfe / reg_mad
+
+cat("Regression with Trend+Seasonal Forecast Feb 2026:", 
+    round(reg_forecast, 2), "\n")
+cat("Bias:", round(reg_bias, 2), "| MAD:", round(reg_mad, 2),
+    "| MSE:", round(reg_mse, 2), "| MAPE:", round(reg_mape, 2), "%\n")
+cat("RSFE:", round(reg_rsfe, 2), "| Tracking Signal:", round(reg_ts, 2), "\n")
+
+reg_df <- data.frame(
+  date   = as.numeric(time(ts_cci)),
+  actual = as.numeric(ts_cci),
+  fitted = reg_fitted
+)
+
+ggplot(reg_df, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = fitted, color = "Regression"),
+            linewidth = 0.8, linetype = "dashed") +
+  scale_color_manual(values = c("Actual" = "steelblue",
+                                 "Regression" = "darkviolet")) +
+  labs(title = "Actual vs Regression with Trend and Seasonal Dummies",
+       x = "Year", y = "Index Value", color = "") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = 2015:2026)
+```
+## 15. Forecast Accuracy Comparison
+
+```{r comparison_table}
+library(knitr)
+
+comparison <- data.frame(
+  Method = c("Naive", "Moving Average (3)", "Weighted Moving Average",
+             "Exponential Smoothing", "Trend-Adjusted ES (Holt)",
+             "Linear Trend", "Seasonal Indices", 
+             "Additive Decomposition", "Multiplicative Decomposition",
+             "Regression Trend+Seasonal"),
+  Bias = round(c(naive_bias, ma_bias, wma_bias, es_bias, holt_bias,
+                  trend_bias, NA, add_bias, mult_bias, reg_bias), 2),
+  MAD  = round(c(naive_mad, ma_mad, wma_mad, es_mad, holt_mad,
+                  trend_mad, NA, add_mad, mult_mad, reg_mad), 2),
+  MSE  = round(c(naive_mse, ma_mse, wma_mse, es_mse, holt_mse,
+                  trend_mse, NA, add_mse, mult_mse, reg_mse), 2),
+  MAPE = round(c(naive_mape, ma_mape, wma_mape, es_mape, holt_mape,
+                  trend_mape, NA, add_mape, mult_mape, reg_mape), 2),
+  RSFE = round(c(naive_rsfe, ma_rsfe, wma_rsfe, es_rsfe, holt_rsfe,
+                  trend_rsfe, NA, add_rsfe, mult_rsfe, reg_rsfe), 2),
+  Tracking_Signal = round(c(naive_ts, ma_ts, wma_ts, es_ts, holt_ts,
+                              trend_ts, NA, add_ts, mult_ts, reg_ts), 2),
+  Next_Period_Forecast = round(c(naive_forecast, ma_forecast, wma_forecast,
+                                  es_forecast, holt_forecast, trend_forecast,
+                                  NA, NA, NA, reg_forecast), 2)
+)
+
+kable(comparison, caption = "Forecast Accuracy Comparison Table")
+```
+
+## 16. Superior Method Selection
+
+```{r superior_method}
+cat("=== SUPERIOR METHOD SELECTION ===\n\n")
+cat("Selected Method: Trend-Adjusted Exponential Smoothing (Holt's Method)\n\n")
+cat("Justification:\n")
+cat("1. The CCI series shows a dominant upward trend throughout 2015-2026.\n")
+cat("2. Holt's method explicitly models both level and trend components.\n")
+cat("3. Alpha=0.9 gives high weight to recent observations (appropriate for\n")
+cat("   rapidly changing inflation-driven index).\n")
+cat("4. Beta=0.3 allows moderate trend adaptation.\n")
+cat("5. MAPE is competitive and tracking signal is acceptable.\n")
+cat("6. Unlike linear trend, Holt's captures non-linear acceleration.\n\n")
+cat("Forecast for February 2026:", round(holt_forecast, 2), "\n")
+
+# Final plot
+final_df <- data.frame(
+  date   = as.numeric(time(ts_cci)),
+  actual = as.numeric(ts_cci),
+  fitted = holt_fitted
+)
+
+# Add forecast point
+forecast_point <- data.frame(
+  date   = 2026 + 1/12,
+  actual = NA,
+  fitted = holt_forecast
+)
+
+ggplot(final_df, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = fitted, color = "Holt's ES"), 
+            linewidth = 0.8, linetype = "dashed") +
+  geom_point(data = forecast_point, 
+             aes(x = date, y = fitted), 
+             color = "darkred", size = 4, shape = 17) +
+  annotate("text", x = 2026.1, y = holt_forecast + 50,
+           label = paste0("Feb 2026\nForecast: ", round(holt_forecast, 2)),
+           color = "darkred", size = 3.5) +
+  scale_color_manual(values = c("Actual" = "steelblue",
+                                 "Holt's ES" = "darkred")) +
+  labs(title = "Superior Method: Trend-Adjusted Exponential Smoothing",
+       subtitle = "Final Forecast for February 2026",
+       x = "Year", y = "Index Value", color = "") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous(breaks = 2015:2026)
+```
+
+## 17. Final Forecast Summary
+
+```{r final_forecast}
+final_result <- data.frame(
+  Item  = c("Selected Superior Method", "Data Access Date",
+             "Latest Available Observation", "Forecast Target Period",
+             "Forecasted Value", "Alpha", "Beta"),
+  Value = c("Trend-Adjusted Exponential Smoothing (Holt's Method)",
+             format(Sys.Date(), "%Y-%m-%d"),
+             "January 2026", "February 2026",
+             round(holt_forecast, 2), "0.9", "0.3")
+)
+
+kable(final_result, caption = "Final Forecast Result")
+
+cat("\nInterpretation:\n")
+cat("The Construction Cost Index is forecast to reach", 
+    round(holt_forecast, 2), "in February 2026.\n")
+cat("This represents a continued upward trend driven by inflation\n")
+cat("and rising construction material costs in Turkey.\n")
+```
+
+## 18. Limitations
+
+The following limitations should be considered when interpreting this forecast:
+
+- The series contains a structural break around 2021-2022 due to Turkey's high inflation period, which may reduce forecast accuracy.
+- Seasonal patterns are weak compared to the trend, so seasonal methods add limited value.
+- Only 133 monthly observations are available (2015-2026), which limits the robustness of decomposition methods.
+- The forecast is for one period ahead only; longer-horizon forecasts would carry much higher uncertainty.
+- External shocks (policy changes, commodity price spikes) cannot be captured by time series methods alone.
+
+## 19. Reproducibility
+
+This project can be reproduced by:
+
+1. Installing R 4.6.0 and RStudio
+2. Installing the `tuikr` package from GitHub: `pak::pak("emraher/tuikr")`
+3. Installing required packages: `httr`, `readxl`, `dplyr`, `tidyr`, `ggplot2`, `scales`, `forecast`
+4. Opening `forecasting_project.Rmd` and clicking **Knit**
+5. Data is accessed directly from TÜİK via `tuikr::statistical_tables()` — no manual download required
