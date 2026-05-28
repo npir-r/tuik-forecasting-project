@@ -1,4 +1,4 @@
-# T<U+00DC><U+0130>K Forecasting Project
+#TÜİK Forecasting Project
 
 ## 1. Project Overview
 
