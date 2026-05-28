@@ -1,10 +1,11 @@
-#TÜİK Forecasting Project
+# T<U+00DC><U+0130>K Forecasting Project
 
 ## 1. Project Overview
 
 This project forecasts the Construction Cost Index (2015=100) published by TurkStat (T<U+00DC><U+0130>K) using monthly time series data accessed directly through the tuikr R package.
 
 ## 2. Data Source and T<U+00DC><U+0130>K Connection
+
 - T<U+00DC><U+0130>K data set name: Construction Cost Index
 - T<U+00DC><U+0130>K theme/category: Price Statistics (Theme 6)
 - T<U+00DC><U+0130>K table name: Construction Cost Index (2015=100) and Rate of Change
@@ -93,6 +94,6 @@ tuik-forecasting-project/
 
 ## 14. Author
 
-- Student name: Adiniz Soyadiniz
-- Student number: Ogrenci Numaraniz
+- Student name: Nazl<U+0131> Pirim
+- Student number: 138722015
 - Course name: Forecasting Methods
