@@ -1,14 +1,14 @@
-# TÜu130K Forecasting Project — Construction Cost Index (2015=100)
+# TÜİK Forecasting Project — Construction Cost Index (2015=100)
 
 ## 1. Project Overview
-This project forecasts the TÜu130K Construction Cost Index (2015=100) using monthly 
+This project forecasts the TÜİK Construction Cost Index (2015=100) using monthly 
 data from January 2015 to January 2026. Ten quantitative forecasting methods are 
 applied and compared. The superior method is used to forecast February 2026.
 
-## 2. Data Source and TÜu130K Connection
-- TÜu130K dataset name: Construction Cost Index (2015=100) and Rate of Change
-- TÜu130K theme/category: Price Statistics (Theme 6)
-- TÜu130K table name: Construction Cost Index (2015=100) and Rate of Change
+## 2. Data Source and TÜİK Connection
+- TÜİK dataset name: Construction Cost Index (2015=100) and Rate of Change
+- TÜİK theme/category: Price Statistics (Theme 6)
+- TÜİK table name: Construction Cost Index (2015=100) and Rate of Change
 - Node type: istab
 - Selected variable: Construction Cost Index (2015=100)
 - Data frequency: Monthly
@@ -22,8 +22,8 @@ The Construction Cost Index measures monthly changes in the cost of construction
 inputs in Turkey. Forecasting this index is valuable for construction firms, 
 investors, and policymakers to anticipate cost pressures.
 
-## 4. Use of TÜu130K Data in R
-Data were accessed directly from the TÜu130K Data Portal using the tuikr package 
+## 4. Use of TÜİK Data in R
+Data were accessed directly from the TÜİK Data Portal using the tuikr package 
 (statistical_tables()) and httr::GET() with browser headers. No manual 
 download or external file was used. All filtering and formatting were performed 
 within the R notebook.
