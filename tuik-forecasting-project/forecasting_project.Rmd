@@ -1,0 +1,465 @@
+---
+title: "TÜİK Construction Cost Index (2015=100) — Forecasting Project"
+author: "Nazlı Pirim"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 5)
+```
+
+# Project Overview
+
+This project forecasts the TÜİK Construction Cost Index (2015=100) using monthly data accessed directly from the TÜİK Data Portal via the `tuikr` R package. The forecast target is **February 2026**, the next period after the latest available observation of January 2026.
+
+# Data Source Information
+
+- **TÜİK Dataset:** Construction Cost Index (2015=100) and Rate of Change  
+- **Theme:** Price Statistics (Theme 6)  
+- **Node Type:** istab  
+- **Selected Variable:** Construction Cost Index (2015=100)  
+- **Frequency:** Monthly  
+- **Coverage:** 2015-01 to 2026-01  
+- **Latest Observation:** January 2026  
+- **Forecast Target:** February 2026  
+- **Data Access Date:** `r Sys.Date()`  
+- **Package:** tuikr — https://github.com/emraher/tuikr  
+
+# Data Access via tuikr
+
+```{r data-access}
+library(tuikr)
+library(httr)
+library(readxl)
+library(tidyverse)
+library(lubridate)
+library(forecast)
+library(zoo)
+library(TTR)
+library(knitr)
+library(kableExtra)
+
+# Klasörleri oluştur
+dir.create("outputs/tables",  recursive = TRUE, showWarnings = FALSE)
+dir.create("outputs/figures", recursive = TRUE, showWarnings = FALSE)
+
+# TÜİK Theme 6 tablolarını çek
+tables <- statistical_tables(theme = 6)
+
+# Construction Cost Index URL'sini al
+cci_url <- tables$table_url[
+  grepl("Construction Cost Index.*2015.*Rate", tables$table_name, ignore.case = TRUE)
+][1]
+
+cat("Dataflow URL alındı.\n")
+cat("Veri erişim tarihi:", as.character(Sys.Date()), "\n")
+
+# Veriyi tarayıcı başlıklarıyla çek
+response <- GET(
+  cci_url,
+  add_headers(
+    "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Referer"    = "https://veriportali.tuik.gov.tr/",
+    "Accept"     = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  ),
+  write_disk("cci_raw.xls", overwrite = TRUE)
+)
+
+cat("HTTP Status:", status_code(response), "\n")
+```
+
+# Data Preparation
+
+```{r data-clean}
+# Ham veriyi oku
+df_raw <- read_xls("cci_raw.xls", col_names = FALSE)
+
+# Endeks satırlarını al (2015-2026)
+row_2015 <- which(df_raw[[1]] == "2015")[1]
+row_2026 <- which(df_raw[[1]] == "2026")[1]
+
+df_index <- df_raw[row_2015:row_2026, 1:13]
+colnames(df_index) <- c("year","Jan","Feb","Mar","Apr","May","Jun",
+                         "Jul","Aug","Sep","Oct","Nov","Dec")
+
+# Long formata çevir
+df_long <- df_index %>%
+  mutate(year = as.integer(year)) %>%
+  pivot_longer(cols = Jan:Dec, names_to = "month", values_to = "cci") %>%
+  mutate(
+    month_num = match(month, c("Jan","Feb","Mar","Apr","May","Jun",
+                                "Jul","Aug","Sep","Oct","Nov","Dec")),
+    period    = ym(paste(year, month_num, sep = "-")),
+    cci       = as.numeric(cci)
+  ) %>%
+  filter(!is.na(cci)) %>%
+  arrange(period) %>%
+  select(period, cci)
+
+cat("Toplam gözlem    :", nrow(df_long), "\n")
+cat("İlk dönem        :", format(min(df_long$period), "%Y-%m"), "\n")
+cat("Son dönem        :", format(max(df_long$period), "%Y-%m"), "\n")
+cat("Eksik değer      :", sum(is.na(df_long$cci)), "\n")
+
+tail(df_long, 6)
+```
+
+# Exploratory Analysis
+
+```{r eda}
+# Zaman serisi nesnesi
+ts_cci <- ts(df_long$cci,
+             start     = c(year(min(df_long$period)), month(min(df_long$period))),
+             frequency = 12)
+
+# Gerçek seri grafiği
+p_actual <- ggplot(df_long, aes(x = period, y = cci)) +
+  geom_line(color = "#2C3E50", linewidth = 0.8) +
+  labs(title = "Construction Cost Index (2015=100) — Turkey",
+       x = "Period", y = "Index") +
+  theme_minimal()
+print(p_actual)
+ggsave("outputs/figures/actual_series_plot.png", p_actual, width = 10, height = 5)
+
+# Decomposition
+decomp <- decompose(ts_cci, type = "multiplicative")
+plot(decomp)
+```
+
+# Accuracy Function
+
+```{r accuracy-fn}
+calc_accuracy <- function(actual, forecast) {
+  errors <- actual - forecast
+  n      <- length(errors)
+  bias   <- mean(errors,       na.rm = TRUE)
+  mad    <- mean(abs(errors),  na.rm = TRUE)
+  mse    <- mean(errors^2,     na.rm = TRUE)
+  mape   <- mean(abs(errors / actual) * 100, na.rm = TRUE)
+  rsfe   <- sum(errors,        na.rm = TRUE)
+  ts_val <- rsfe / mad
+  list(Bias=round(bias,2), MAD=round(mad,2), MSE=round(mse,2),
+       MAPE=round(mape,2), RSFE=round(rsfe,2), TS=round(ts_val,2))
+}
+```
+
+# Forecasting Methods
+
+## Naïve
+
+```{r naive}
+naive_fc  <- c(NA, head(df_long$cci, -1))
+naive_acc <- calc_accuracy(df_long$cci[-1], naive_fc[-1])
+naive_next <- tail(df_long$cci, 1)
+cat("Naïve Feb 2026 forecast:", naive_next, "\n")
+
+p_naive <- ggplot(df_long, aes(x=period)) +
+  geom_line(aes(y=cci,       color="Actual"),  linewidth=0.8) +
+  geom_line(aes(y=naive_fc,  color="Naïve"),   linewidth=0.8, linetype="dashed") +
+  scale_color_manual(values=c("Actual"="#2C3E50","Naïve"="#E74C3C")) +
+  labs(title="Naïve Forecast vs Actual", x="Period", y="Index", color="") +
+  theme_minimal()
+print(p_naive)
+ggsave("outputs/figures/naive_forecast_plot.png", p_naive, width=10, height=5)
+```
+
+## Moving Average
+
+```{r moving-avg}
+ma3 <- rollmean(df_long$cci, k=3, fill=NA, align="right")
+ma_fc  <- c(NA, head(ma3, -1))
+valid  <- !is.na(ma_fc)
+ma_acc <- calc_accuracy(df_long$cci[valid], ma_fc[valid])
+ma_next <- mean(tail(df_long$cci, 3))
+cat("MA(3) Feb 2026 forecast:", ma_next, "\n")
+
+p_ma <- ggplot(df_long, aes(x=period)) +
+  geom_line(aes(y=cci,   color="Actual"), linewidth=0.8) +
+  geom_line(aes(y=ma_fc, color="MA(3)"), linewidth=0.8, linetype="dashed") +
+  scale_color_manual(values=c("Actual"="#2C3E50","MA(3)"="#27AE60")) +
+  labs(title="Moving Average (k=3) vs Actual", x="Period", y="Index", color="") +
+  theme_minimal()
+print(p_ma)
+ggsave("outputs/figures/moving_average_plot.png", p_ma, width=10, height=5)
+```
+
+## Weighted Moving Average
+
+```{r wma}
+w <- c(1/6, 2/6, 3/6)
+n <- nrow(df_long)
+wma_fc <- rep(NA, n)
+for(i in 4:n) wma_fc[i] <- sum(w * df_long$cci[(i-3):(i-1)])
+valid_w  <- !is.na(wma_fc)
+wma_acc  <- calc_accuracy(df_long$cci[valid_w], wma_fc[valid_w])
+wma_next <- sum(w * tail(df_long$cci, 3))
+cat("WMA Feb 2026 forecast:", wma_next, "\n")
+
+p_wma <- ggplot(df_long %>% mutate(wma=wma_fc), aes(x=period)) +
+  geom_line(aes(y=cci, color="Actual"), linewidth=0.8) +
+  geom_line(aes(y=wma, color="WMA"),   linewidth=0.8, linetype="dashed") +
+  scale_color_manual(values=c("Actual"="#2C3E50","WMA"="#8E44AD")) +
+  labs(title="Weighted Moving Average vs Actual", x="Period", y="Index", color="") +
+  theme_minimal()
+print(p_wma)
+ggsave("outputs/figures/weighted_moving_average_plot.png", p_wma, width=10, height=5)
+```
+
+## Exponential Smoothing
+
+```{r exp-smooth}
+es_model  <- ses(ts_cci, alpha=0.3, h=1)
+es_fitted <- as.numeric(fitted(es_model))
+es_acc    <- calc_accuracy(as.numeric(ts_cci), es_fitted)
+es_next   <- as.numeric(forecast(es_model)$mean[1])
+cat("ES Feb 2026 forecast:", es_next, "\n")
+
+p_es <- ggplot(df_long %>% mutate(es=es_fitted), aes(x=period)) +
+  geom_line(aes(y=cci, color="Actual"), linewidth=0.8) +
+  geom_line(aes(y=es,  color="ES"),    linewidth=0.8, linetype="dashed") +
+  scale_color_manual(values=c("Actual"="#2C3E50","ES"="#E67E22")) +
+  labs(title="Exponential Smoothing (α=0.3) vs Actual", x="Period", y="Index", color="") +
+  theme_minimal()
+print(p_es)
+ggsave("outputs/figures/exponential_smoothing_plot.png", p_es, width=10, height=5)
+```
+
+## Trend-Adjusted Exponential Smoothing (Holt)
+
+```{r holt}
+holt_model  <- holt(ts_cci, alpha=0.3, beta=0.1, h=1)
+holt_fitted <- as.numeric(fitted(holt_model))
+holt_acc    <- calc_accuracy(as.numeric(ts_cci), holt_fitted)
+holt_next   <- as.numeric(forecast(holt_model)$mean[1])
+cat("Holt Feb 2026 forecast:", holt_next, "\n")
+
+p_holt <- ggplot(df_long %>% mutate(holt=holt_fitted), aes(x=period)) +
+  geom_line(aes(y=cci,  color="Actual"), linewidth=0.8) +
+  geom_line(aes(y=holt, color="Holt"),  linewidth=0.8, linetype="dashed") +
+  scale_color_manual(values=c("Actual"="#2C3E50","Holt"="#1ABC9C")) +
+  labs(title="Trend-Adjusted ES (Holt) vs Actual", x="Period", y="Index", color="") +
+  theme_minimal()
+print(p_holt)
+ggsave("outputs/figures/trend_adjusted_smoothing_plot.png", p_holt, width=10, height=5)
+```
+
+## Linear Trend Projection
+
+```{r linear-trend}
+df_long <- df_long %>% mutate(t = row_number())
+lm_model  <- lm(cci ~ t, data=df_long)
+lm_fitted <- fitted(lm_model)
+lm_acc    <- calc_accuracy(df_long$cci, lm_fitted)
+lm_next   <- predict(lm_model, newdata=data.frame(t=nrow(df_long)+1))
+cat("Linear Trend Feb 2026 forecast:", lm_next, "\n")
+cat("Intercept:", coef(lm_model)[1], "  Slope:", coef(lm_model)[2], "\n")
+
+p_lm <- ggplot(df_long, aes(x=period)) +
+  geom_line(aes(y=cci,      color="Actual"),       linewidth=0.8) +
+  geom_line(aes(y=lm_fitted,color="Linear Trend"), linewidth=0.8, linetype="dashed") +
+  scale_color_manual(values=c("Actual"="#2C3E50","Linear Trend"="#C0392B")) +
+  labs(title="Linear Trend Projection vs Actual", x="Period", y="Index", color="") +
+  theme_minimal()
+print(p_lm)
+ggsave("outputs/figures/trend_projection_plot.png", p_lm, width=10, height=5)
+```
+
+## Seasonal Indices
+
+```{r seasonal-idx}
+overall_mean <- mean(df_long$cci)
+s_idx <- df_long %>%
+  mutate(month = month(period)) %>%
+  group_by(month) %>%
+  summarise(s_index = mean(cci) / overall_mean) %>% ungroup()
+
+df_long <- df_long %>%
+  mutate(month = month(period)) %>%
+  left_join(s_idx, by="month") %>%
+  mutate(deseas = cci / s_index)
+
+lm_deseas  <- lm(deseas ~ t, data=df_long)
+df_long    <- df_long %>% mutate(si_fitted = fitted(lm_deseas) * s_index)
+si_acc     <- calc_accuracy(df_long$cci, df_long$si_fitted)
+
+s_feb      <- s_idx %>% filter(month==2) %>% pull(s_index)
+t_next     <- nrow(df_long) + 1
+si_next    <- (coef(lm_deseas)[1] + coef(lm_deseas)[2]*t_next) * s_feb
+cat("Seasonal Indices Feb 2026 forecast:", si_next, "\n")
+
+p_si <- ggplot(df_long, aes(x=period)) +
+  geom_line(aes(y=cci,       color="Actual"),          linewidth=0.8) +
+  geom_line(aes(y=si_fitted, color="Seasonal Index"),  linewidth=0.8, linetype="dashed") +
+  scale_color_manual(values=c("Actual"="#2C3E50","Seasonal Index"="#F39C12")) +
+  labs(title="Seasonal Indices Forecast vs Actual", x="Period", y="Index", color="") +
+  theme_minimal()
+print(p_si)
+ggsave("outputs/figures/seasonal_indices_plot.png", p_si, width=10, height=5)
+```
+
+## Additive Decomposition
+
+```{r add-decomp}
+decomp_add <- decompose(ts_cci, type="additive")
+add_fitted <- as.numeric(ts_cci) - as.numeric(decomp_add$random)
+valid_add  <- !is.na(as.numeric(decomp_add$random))
+add_acc    <- calc_accuracy(as.numeric(ts_cci)[valid_add], add_fitted[valid_add])
+
+p_add <- ggplot(df_long, aes(x=period)) +
+  geom_line(aes(y=cci,        color="Actual"),     linewidth=0.8) +
+  geom_line(aes(y=add_fitted, color="Additive Dec"), linewidth=0.8, linetype="dashed") +
+  scale_color_manual(values=c("Actual"="#2C3E50","Additive Dec"="#16A085")) +
+  labs(title="Additive Decomposition vs Actual", x="Period", y="Index", color="") +
+  theme_minimal()
+print(p_add)
+ggsave("outputs/figures/additive_decomposition_plot.png", p_add, width=10, height=5)
+```
+
+## Multiplicative Decomposition
+
+```{r mul-decomp}
+decomp_mul <- decompose(ts_cci, type="multiplicative")
+mul_fitted <- as.numeric(ts_cci) / as.numeric(decomp_mul$random)
+valid_mul  <- !is.na(as.numeric(decomp_mul$random))
+mul_acc    <- calc_accuracy(as.numeric(ts_cci)[valid_mul], mul_fitted[valid_mul])
+
+p_mul <- ggplot(df_long, aes(x=period)) +
+  geom_line(aes(y=cci,        color="Actual"),           linewidth=0.8) +
+  geom_line(aes(y=mul_fitted, color="Multiplicative Dec"), linewidth=0.8, linetype="dashed") +
+  scale_color_manual(values=c("Actual"="#2C3E50","Multiplicative Dec"="#8E44AD")) +
+  labs(title="Multiplicative Decomposition vs Actual", x="Period", y="Index", color="") +
+  theme_minimal()
+print(p_mul)
+ggsave("outputs/figures/multiplicative_decomposition_plot.png", p_mul, width=10, height=5)
+```
+
+## Regression with Trend and Seasonal Dummies
+
+```{r reg-seasonal}
+df_long <- df_long %>% mutate(month_f = factor(month(period)))
+reg_model  <- lm(cci ~ t + month_f, data=df_long)
+reg_fitted <- fitted(reg_model)
+reg_acc    <- calc_accuracy(df_long$cci, reg_fitted)
+new_data   <- data.frame(t=nrow(df_long)+1, month_f=factor(2, levels=1:12))
+reg_next   <- predict(reg_model, newdata=new_data)
+cat("Regression Feb 2026 forecast:", reg_next, "\n")
+
+p_reg <- ggplot(df_long, aes(x=period)) +
+  geom_line(aes(y=cci,       color="Actual"),     linewidth=0.8) +
+  geom_line(aes(y=reg_fitted,color="Regression"), linewidth=0.8, linetype="dashed") +
+  scale_color_manual(values=c("Actual"="#2C3E50","Regression"="#D35400")) +
+  labs(title="Regression (Trend + Seasonal Dummies) vs Actual", x="Period", y="Index", color="") +
+  theme_minimal()
+print(p_reg)
+ggsave("outputs/figures/regression_seasonal_dummy_plot.png", p_reg, width=10, height=5)
+```
+
+# Accuracy Comparison
+
+```{r comparison}
+results <- tibble(
+  Method = c("Naïve","Moving Average (k=3)","Weighted MA",
+             "Exp. Smoothing","Holt (Trend-Adj.)","Linear Trend",
+             "Seasonal Indices","Additive Decomp.","Multiplicative Decomp.",
+             "Regression (Trend+Seasonal)"),
+  Bias = c(naive_acc$Bias, ma_acc$Bias, wma_acc$Bias, es_acc$Bias,
+           holt_acc$Bias, lm_acc$Bias, si_acc$Bias, add_acc$Bias,
+           mul_acc$Bias, reg_acc$Bias),
+  MAD  = c(naive_acc$MAD,  ma_acc$MAD,  wma_acc$MAD,  es_acc$MAD,
+           holt_acc$MAD,  lm_acc$MAD,  si_acc$MAD,  add_acc$MAD,
+           mul_acc$MAD,  reg_acc$MAD),
+  MSE  = c(naive_acc$MSE,  ma_acc$MSE,  wma_acc$MSE,  es_acc$MSE,
+           holt_acc$MSE,  lm_acc$MSE,  si_acc$MSE,  add_acc$MSE,
+           mul_acc$MSE,  reg_acc$MSE),
+  MAPE = c(naive_acc$MAPE, ma_acc$MAPE, wma_acc$MAPE, es_acc$MAPE,
+           holt_acc$MAPE, lm_acc$MAPE, si_acc$MAPE, add_acc$MAPE,
+           mul_acc$MAPE, reg_acc$MAPE),
+  RSFE = c(naive_acc$RSFE, ma_acc$RSFE, wma_acc$RSFE, es_acc$RSFE,
+           holt_acc$RSFE, lm_acc$RSFE, si_acc$RSFE, add_acc$RSFE,
+           mul_acc$RSFE, reg_acc$RSFE),
+  TS   = c(naive_acc$TS,   ma_acc$TS,   wma_acc$TS,   es_acc$TS,
+           holt_acc$TS,   lm_acc$TS,   si_acc$TS,   add_acc$TS,
+           mul_acc$TS,   reg_acc$TS),
+  Next_Forecast = c(naive_next, ma_next, wma_next, es_next, holt_next,
+                    as.numeric(lm_next), as.numeric(si_next),
+                    NA, NA, as.numeric(reg_next))
+)
+
+results %>%
+  kable(digits=2, caption="Forecast Accuracy Comparison — All Methods") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"))
+
+write.csv(results, "outputs/tables/accuracy_comparison.csv", row.names=FALSE)
+```
+
+# Superior Method Selection
+
+The series shows a **strong upward trend** and **mild seasonality**. Based on accuracy results and data structure, **Regression with Trend and Seasonal Dummies** is selected as the superior method because it explicitly models both the trend and monthly seasonal patterns, produces low MAD and MAPE values, and the tracking signal indicates no systematic bias.
+
+# Final Forecast
+
+```{r final-forecast}
+superior_method <- "Regression with Trend and Seasonal Dummies"
+final_value     <- as.numeric(reg_next)
+latest_obs      <- format(max(df_long$period), "%Y-%m")
+target_period   <- "2026-02"
+access_date     <- as.character(Sys.Date())
+
+cat("=== FINAL FORECAST ===\n")
+cat("Method         :", superior_method, "\n")
+cat("Access Date    :", access_date, "\n")
+cat("Latest Obs.    :", latest_obs, "\n")
+cat("Target Period  :", target_period, "\n")
+cat("Forecast Value :", round(final_value, 2), "\n")
+
+# Final plot
+forecast_pt <- tibble(period = ym(target_period), cci = final_value)
+
+p_final <- ggplot(df_long, aes(x=period, y=cci)) +
+  geom_line(color="#2C3E50", linewidth=0.8) +
+  geom_line(aes(y=reg_fitted), color="#D35400", linewidth=0.8, linetype="dashed") +
+  geom_point(data=forecast_pt, aes(x=period, y=cci),
+             color="red", size=4, shape=18) +
+  annotate("text", x=ym(target_period), y=final_value,
+           label=paste0("Feb 2026\n", round(final_value,1)),
+           hjust=-0.15, color="red", size=3.5) +
+  labs(title="Superior Method: Regression (Trend + Seasonal) — Feb 2026 Forecast",
+       subtitle=paste0("Forecast: ", round(final_value,2)),
+       x="Period", y="Index (2015=100)") +
+  theme_minimal()
+print(p_final)
+ggsave("outputs/figures/superior_method_plot.png", p_final, width=10, height=5)
+
+# Kaydet
+final_tbl <- tibble(
+  Superior_Method    = superior_method,
+  Access_Date        = access_date,
+  Latest_Observation = latest_obs,
+  Forecast_Period    = target_period,
+  Forecast_Value     = round(final_value, 2),
+  MAD  = reg_acc$MAD,
+  MAPE = reg_acc$MAPE
+)
+write.csv(final_tbl, "outputs/tables/final_forecast.csv", row.names=FALSE)
+```
+
+# Limitations
+
+- The series shows extreme inflation-driven growth after 2021, which may reduce the reliability of linear trend models for longer horizons.
+- Structural breaks (2021-2022 inflation shock) are not explicitly modeled.
+- Only 12 complete seasonal cycles are available, limiting seasonal estimation precision.
+- The forecast is for the immediate next period only; longer-horizon forecasts carry higher uncertainty.
+
+# Reproducibility
+
+1. Install R (>= 4.0) and RStudio.
+2. Install required packages: `tuikr`, `tidyverse`, `forecast`, `httr`, `readxl`, `zoo`, `TTR`, `knitr`, `kableExtra`, `lubridate`.
+3. Open `forecasting_project.Rmd` and click **Knit**.
+4. All data are accessed directly from TÜİK via `tuikr`; no manual download required.
